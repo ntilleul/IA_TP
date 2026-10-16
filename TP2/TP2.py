@@ -1,9 +1,10 @@
 import csv
 from pathlib import Path
 
+import keras
 import numpy as np
 
-DATA_DIR = Path(__file__).resolve().parent.parent / "Data_set_AntiSPam" / "Uses_Cases" / "Spam"
+DATA_DIR = Path(__file__).resolve().parent.parent / "Data_set_AntiSpam" / "Uses_Cases" / "Spam"
 
 
 def load_data(path, delimiter, target_column):
@@ -24,104 +25,57 @@ def load_data(path, delimiter, target_column):
     )
     return features, labels, feature_names
 
-def initialisation(features):
-    """Initialise les poids et le biais du neurone de sortie."""
-    weights = np.zeros(features.shape[1], dtype=float)
-    bias = 0.0
-    return weights, bias
+def build_model_m1(training_features):
+    normalization = keras.layers.Normalization(axis=-1)
+    normalization.adapt(training_features)
 
-def sigmoid(values):
-    return 1.0 / (1.0 + np.exp(-np.clip(values, -500.0, 500.0)))
-
-def train_model(features, labels, learning_rate=0.1, iterations=2000):
-    feature_mean = features.mean(axis=0)
-    feature_scale = features.std(axis=0)
-    feature_scale[feature_scale == 0.0] = 1.0
-    normalized_features = (features - feature_mean) / feature_scale
-
-    weights, bias = initialisation(normalized_features)
-    for _ in range(iterations):
-        probabilities = sigmoid(normalized_features @ weights + bias)
-        weight_gradient = normalized_features.T @ (probabilities - labels) / len(labels)
-        bias_gradient = np.mean(probabilities - labels)
-        weights -= learning_rate * weight_gradient
-        bias -= learning_rate * bias_gradient
-
-    return {
-        "weights": weights,
-        "bias": bias,
-        "feature_mean": feature_mean,
-        "feature_scale": feature_scale,
-    }
-
-
-def train_model_m2(features, labels, hidden_units=32, learning_rate=0.01, iterations=1000):
-    feature_mean = features.mean(axis=0)
-    feature_scale = features.std(axis=0)
-    feature_scale[feature_scale == 0.0] = 1.0
-    normalized_features = (features - feature_mean) / feature_scale
-
-    rng = np.random.default_rng(42)
-    input_weights = rng.normal(
-        0.0, np.sqrt(1.0 / normalized_features.shape[1]),
-        (normalized_features.shape[1], hidden_units),
+    model = keras.Sequential(
+        [
+            keras.Input(shape=(training_features.shape[1],)),
+            normalization,
+            keras.layers.Dense(1, activation="sigmoid"),
+        ],
+        name="M1_sans_couche_cachee",
     )
-    hidden_bias = np.zeros(hidden_units)
-    output_weights = rng.normal(0.0, np.sqrt(1.0 / hidden_units), hidden_units)
-    output_bias = 0.0
-
-    parameters = [input_weights, hidden_bias, output_weights, output_bias]
-    first_moments = [np.zeros_like(parameter) for parameter in parameters]
-    second_moments = [np.zeros_like(parameter) for parameter in parameters]
-    beta1, beta2, epsilon = 0.9, 0.999, 1e-8
-
-    for iteration in range(1, iterations + 1):
-        hidden_values = np.tanh(normalized_features @ input_weights + hidden_bias)
-        probabilities = sigmoid(hidden_values @ output_weights + output_bias)
-
-        output_error = (probabilities - labels) / len(labels)
-        output_weights_gradient = hidden_values.T @ output_error
-        output_bias_gradient = np.sum(output_error)
-        hidden_error = np.outer(output_error, output_weights) * (1.0 - hidden_values**2)
-        input_weights_gradient = normalized_features.T @ hidden_error
-        hidden_bias_gradient = np.sum(hidden_error, axis=0)
-
-        gradients = [
-            input_weights_gradient,
-            hidden_bias_gradient,
-            output_weights_gradient,
-            output_bias_gradient,
-        ]
-        for index, (parameter, gradient) in enumerate(zip(parameters, gradients)):
-            first_moments[index] = beta1 * first_moments[index] + (1.0 - beta1) * gradient
-            second_moments[index] = beta2 * second_moments[index] + (1.0 - beta2) * gradient**2
-            corrected_first = first_moments[index] / (1.0 - beta1**iteration)
-            corrected_second = second_moments[index] / (1.0 - beta2**iteration)
-            parameters[index] -= learning_rate * corrected_first / (
-                np.sqrt(corrected_second) + epsilon
-            )
-
-    return {
-        "input_weights": input_weights,
-        "hidden_bias": hidden_bias,
-        "output_weights": output_weights,
-        "output_bias": output_bias,
-        "feature_mean": feature_mean,
-        "feature_scale": feature_scale,
-    }
+    model.compile(
+        optimizer=keras.optimizers.Adam(learning_rate=0.001),
+        loss="binary_crossentropy",
+        metrics=["accuracy"],
+    )
+    return model
 
 
-def predict_m2(features, model):
-    normalized_features = (features - model["feature_mean"]) / model["feature_scale"]
-    hidden_values = np.tanh(normalized_features @ model["input_weights"] + model["hidden_bias"])
-    probabilities = sigmoid(hidden_values @ model["output_weights"] + model["output_bias"])
-    return (probabilities >= 0.5).astype(int)
+def build_model_m2(training_features, hidden_units=32):
+    normalization = keras.layers.Normalization(axis=-1)
+    normalization.adapt(training_features)
+
+    model = keras.Sequential(
+        [
+            keras.Input(shape=(training_features.shape[1],)),
+            normalization,
+            keras.layers.Dense(hidden_units, activation="tanh"),
+            keras.layers.Dense(1, activation="sigmoid"),
+        ],
+        name="M2_avec_couche_cachee",
+    )
+    model.compile(
+        optimizer=keras.optimizers.Adam(learning_rate=0.001),
+        loss="binary_crossentropy",
+        metrics=["accuracy"],
+    )
+    return model
 
 
-def predict(features, model):
-    normalized_features = (features - model["feature_mean"]) / model["feature_scale"]
-    probabilities = sigmoid(normalized_features @ model["weights"] + model["bias"])
-    return (probabilities >= 0.5).astype(int)
+def evaluate_model(model, training_features, training_labels, test_features, test_labels):
+    model.fit(
+        training_features,
+        training_labels.reshape(-1, 1),
+        epochs=100,
+        batch_size=32,
+        verbose=0,
+    )
+    probabilities = model.predict(test_features, verbose=0).ravel()
+    return float(np.mean((probabilities >= 0.5) == test_labels))
 
 if __name__ == "__main__":
     training_features, training_labels, training_names = load_data(
@@ -133,14 +87,17 @@ if __name__ == "__main__":
     if training_names != test_names:
         raise ValueError("Les variables d'entraînement et de test ne sont pas identiques.")
 
-    model = train_model(training_features, training_labels)
-    predictions = predict(test_features, model)
-    accuracy = np.mean(predictions == test_labels)
+    keras.utils.set_random_seed(42)
+    model_m1 = build_model_m1(training_features)
+    accuracy_m1 = evaluate_model(
+        model_m1, training_features, training_labels, test_features, test_labels
+    )
     print("Architecture M1 : 57 entrées -> 1 neurone sigmoïde (aucune couche cachée)")
-    print(f"Exactitude sur le jeu de test : {accuracy:.2%}")
+    print(f"Exactitude de M1 sur le jeu de test : {accuracy_m1:.2%}")
 
-    model_m2 = train_model_m2(training_features, training_labels)
-    predictions_m2 = predict_m2(test_features, model_m2)
-    accuracy_m2 = np.mean(predictions_m2 == test_labels)
+    model_m2 = build_model_m2(training_features)
+    accuracy_m2 = evaluate_model(
+        model_m2, training_features, training_labels, test_features, test_labels
+    )
     print("Architecture M2 : 57 entrées -> 32 neurones tanh -> 1 neurone sigmoïde")
     print(f"Exactitude de M2 sur le jeu de test : {accuracy_m2:.2%}")
